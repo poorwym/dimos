@@ -44,6 +44,11 @@ class BlobStore(Configurable, CompositeResource):
         """Store a blob for the given stream and observation id."""
         ...
 
+    def put_many(self, stream_name: str, items: list[tuple[int, bytes]]) -> None:
+        """Store multiple blobs for one stream."""
+        for key, data in items:
+            self.put(stream_name, key, data)
+
     @abstractmethod
     def get(self, stream_name: str, key: int) -> bytes:
         """Retrieve a blob by stream name and observation id."""

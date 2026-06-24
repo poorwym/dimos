@@ -207,22 +207,35 @@ def _run_timed(
     return _result(backend, size, benchmark, samples, operations)
 
 
-def _prepare_scalar_stream(store: Store, size: int, stream_name: str) -> BenchmarkResult:
+def _prepare_scalar_stream(store: Store, size: int, stream_name: str) -> list[BenchmarkResult]:
     rng = np.random.default_rng(size)
     positions = rng.uniform(-100.0, 100.0, size=(size, 3)).astype(np.float64)
     stream = store.stream(stream_name, int)
 
     def insert() -> int:
-        for i, (x, y, z) in enumerate(positions):
-            stream.append(
-                i,
-                ts=float(i),
-                pose=(float(x), float(y), float(z), 0.0, 0.0, 0.0, 1.0),
-                tags={"bucket": i % 10, "kind": "even" if i % 2 == 0 else "odd"},
-            )
+        stream.append_many(
+            list(range(size)),
+            ts=[float(i) for i in range(size)],
+            pose=[
+                (float(x), float(y), float(z), 0.0, 0.0, 0.0, 1.0) for x, y, z in positions
+            ],
+            tags=[
+                {"bucket": i % 10, "kind": "even" if i % 2 == 0 else "odd"}
+                for i in range(size)
+            ],
+        )
         return size
 
-    return _run_timed(store_name(store), size, "insert_scalar_pose_tags", insert, repeats=1)
+    backend = store_name(store)
+    results = [_run_timed(backend, size, "insert_scalar_pose_tags", insert, repeats=1)]
+
+    def optimize() -> int:
+        stream._source.metadata_store.optimize()
+        return 1
+
+    if results[0].status == "OK":
+        results.append(_run_timed(backend, size, "optimize_scalar_metadata", optimize, repeats=1))
+    return results
 
 
 def _prepare_vector_stream(
@@ -231,20 +244,35 @@ def _prepare_vector_stream(
     stream_name: str,
     *,
     vector_dim: int,
-) -> tuple[BenchmarkResult, list[Embedding]]:
+) -> tuple[list[BenchmarkResult], list[Embedding]]:
     rng = np.random.default_rng(size + vector_dim)
     vectors = _normalize_rows(rng.normal(size=(size, vector_dim)).astype(np.float32))
     embeddings = [_embedding(row) for row in vectors]
     stream = store.stream(stream_name, int)
 
     def insert() -> int:
-        for i, emb in enumerate(embeddings):
-            stream.append(i, ts=float(i), embedding=emb)
+        stream.append_many(
+            list(range(size)),
+            ts=[float(i) for i in range(size)],
+            embeddings=embeddings,
+        )
         return size
 
-    result = _run_timed(store_name(store), size, f"insert_vectors_dim_{vector_dim}", insert, repeats=1)
+    backend = store_name(store)
+    results = [_run_timed(backend, size, f"insert_vectors_dim_{vector_dim}", insert, repeats=1)]
+
+    def optimize() -> int:
+        vector_store = stream._source.vector_store
+        if vector_store is not None:
+            vector_store.optimize(stream_name)
+        return 1
+
+    if results[0].status == "OK":
+        results.append(
+            _run_timed(backend, size, f"optimize_vectors_dim_{vector_dim}", optimize, repeats=1)
+        )
     queries = [_embedding(row) for row in vectors[: min(len(vectors), 256)]]
-    return result, queries
+    return results, queries
 
 
 def _basic_query_benchmarks(
@@ -436,9 +464,9 @@ def _run_backend(
         scalar_stream = f"{prefix}_scalar"
         vector_stream = f"{prefix}_vector"
 
-        scalar_result = _prepare_scalar_stream(context.store, size, scalar_stream)
-        results.append(scalar_result)
-        if scalar_result.status == "OK":
+        scalar_results = _prepare_scalar_stream(context.store, size, scalar_stream)
+        results.extend(scalar_results)
+        if all(result.status == "OK" for result in scalar_results):
             results.extend(
                 _basic_query_benchmarks(
                     context.store,
@@ -458,14 +486,14 @@ def _run_backend(
                 )
             )
 
-        vector_result, query_embeddings = _prepare_vector_stream(
+        vector_results, query_embeddings = _prepare_vector_stream(
             context.store,
             size,
             vector_stream,
             vector_dim=args.vector_dim,
         )
-        results.append(vector_result)
-        if vector_result.status == "OK":
+        results.extend(vector_results)
+        if all(result.status == "OK" for result in vector_results):
             results.extend(
                 _vector_benchmarks(
                     context.store,

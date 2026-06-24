@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from dimos.memory2.registry import qual
 from dimos.memory2.utils.validation import validate_identifier
 from dimos.memory2.vectorstore.base import VectorStore, VectorStoreConfig
 
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
 
 class PostgresVectorStoreConfig(VectorStoreConfig):
     conn: Any = Field(exclude=True)
+    hnsw_m: int = 16
+    hnsw_ef_construction: int = 64
 
 
 class PostgresVectorStore(VectorStore):
@@ -41,6 +44,7 @@ class PostgresVectorStore(VectorStore):
         self._unavailable_reason: Exception | None = None
         self._vector_type = "public.vector"
         self._distance_operator = "OPERATOR(public.<=>)"
+        self._operator_class = "public.vector_cosine_ops"
         self._tables: dict[str, int] = {}
 
     @staticmethod
@@ -97,6 +101,51 @@ class PostgresVectorStore(VectorStore):
             """,
             (key, vec),
         )
+
+    def put_many(self, stream_name: str, items: list[tuple[int, Embedding]]) -> None:
+        if not items:
+            return
+        self._require_available()
+        validate_identifier(stream_name)
+        dim = len(items[0][1].to_numpy())
+        self._ensure_table(stream_name, dim)
+        params = []
+        for key, embedding in items:
+            if len(embedding.to_numpy()) != dim:
+                raise ValueError("All embeddings in put_many must have the same dimensionality")
+            params.append((key, self._vector_literal(embedding)))
+        self._conn.cursor().executemany(
+            f"""
+            INSERT INTO "{stream_name}_vec" (id, embedding)
+            VALUES (%s, %s::{self._vector_type}({dim}))
+            ON CONFLICT (id) DO UPDATE
+            SET embedding = EXCLUDED.embedding
+            """,
+            params,
+        )
+
+    def optimize(self, stream_name: str) -> None:
+        self._require_available()
+        validate_identifier(stream_name)
+        self._conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS "{stream_name}_vec_embedding_hnsw_idx"
+            ON "{stream_name}_vec"
+            USING hnsw (embedding {self._operator_class})
+            WITH (
+                m = {self.config.hnsw_m},
+                ef_construction = {self.config.hnsw_ef_construction}
+            )
+            """
+        )
+
+    def serialize(self) -> dict[str, Any]:
+        cfg: dict[str, Any] = {}
+        if self.config.hnsw_m != 16:
+            cfg["hnsw_m"] = self.config.hnsw_m
+        if self.config.hnsw_ef_construction != 64:
+            cfg["hnsw_ef_construction"] = self.config.hnsw_ef_construction
+        return {"class": qual(type(self)), "config": cfg}
 
     _DEFAULT_K = 4096
 

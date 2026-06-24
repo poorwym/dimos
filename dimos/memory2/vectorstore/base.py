@@ -51,6 +51,14 @@ class VectorStore(Configurable, CompositeResource):
         """Store an embedding vector for the given stream and observation id."""
         ...
 
+    def put_many(self, stream_name: str, items: list[tuple[int, Embedding]]) -> None:
+        """Store multiple vectors for one stream."""
+        for key, embedding in items:
+            self.put(stream_name, key, embedding)
+
+    def optimize(self, stream_name: str) -> None:
+        """Build or refresh backend-specific vector indexes for a stream."""
+
     @abstractmethod
     def search(self, stream_name: str, query: Embedding, k: int | None) -> list[tuple[int, float]]:
         """Return top-k (observation_id, similarity) pairs, descending.

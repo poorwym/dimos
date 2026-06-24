@@ -92,15 +92,16 @@ def _compile_filter(f: Filter, prefix: str = "") -> tuple[str, list[Any]] | None
         for key, value in f.tags.items():
             if not _IDENT_RE.match(key):
                 raise ValueError(f"Invalid tag key: {key!r}")
-            clauses.append(f"{prefix}tags @> %s::jsonb")
-            params.append(json.dumps({key: value}))
+            clauses.append(f"{prefix}tags -> '{key}' = %s::jsonb")
+            params.append(json.dumps(value))
         return (" AND ".join(clauses), params)
     if isinstance(f, NearFilter):
         cx, cy, cz = f.position.x, f.position.y, f.position.z
+        point = "public.ST_SetSRID(public.ST_MakePoint(%s, %s, %s), 0)::public.geometry"
         return (
-            f"public.ST_3DDWithin({prefix}pose_point, "
-            "public.ST_SetSRID(public.ST_MakePoint(%s, %s, %s), 0)::public.geometry, %s)",
-            [cx, cy, cz, f.radius],
+            f"{prefix}pose_point OPERATOR(public.&&&) public.ST_Expand({point}, %s) "
+            f"AND public.ST_3DDWithin({prefix}pose_point, {point}, %s)",
+            [cx, cy, cz, f.radius, cx, cy, cz, f.radius],
         )
     return None
 
@@ -237,17 +238,6 @@ class PostgresObservationStore(ObservationStore[T]):
         return self._name
 
     def insert(self, obs: Observation[T]) -> int:
-        pose = obs.pose_tuple
-        tags_json = json.dumps(obs.tags) if obs.tags else "{}"
-        if isinstance(obs._data, bool):
-            value = int(obs._data)
-        else:
-            value = obs._data if isinstance(obs._data, (int, float)) else None
-        if pose:
-            px, py, pz, qx, qy, qz, qw = pose
-        else:
-            px = py = pz = qx = qy = qz = qw = None
-
         with self._lock:
             if obs.tags:
                 self._ensure_tag_indexes(obs.tags)
@@ -276,32 +266,168 @@ class PostgresObservationStore(ObservationStore[T]):
                 )
                 RETURNING id
                 """,
-                (
-                    obs.ts,
-                    value,
-                    px,
-                    py,
-                    pz,
-                    qx,
-                    qy,
-                    qz,
-                    qw,
-                    pose is not None,
-                    px,
-                    py,
-                    pz,
-                    tags_json,
-                ),
+                self._insert_params(obs),
             ).fetchone()
         assert row is not None
         return int(row["id"] if isinstance(row, dict) else row[0])
+
+    def insert_many(self, observations: list[Observation[T]]) -> list[int]:
+        if not observations:
+            return []
+        with self._lock:
+            for obs in observations:
+                if obs.tags:
+                    self._ensure_tag_indexes(obs.tags)
+            row = self._conn.execute(
+                f"""
+                WITH rows AS (
+                    SELECT *
+                    FROM unnest(
+                        %s::bigint[],
+                        %s::double precision[],
+                        %s::numeric[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::double precision[],
+                        %s::boolean[],
+                        %s::jsonb[]
+                    ) AS t(
+                        ord, ts, value,
+                        pose_x, pose_y, pose_z,
+                        pose_qx, pose_qy, pose_qz, pose_qw,
+                        has_pose, tags
+                    )
+                )
+                INSERT INTO "{self._name}"
+                    (
+                        ts, value,
+                        pose_x, pose_y, pose_z,
+                        pose_qx, pose_qy, pose_qz, pose_qw,
+                        pose_point,
+                        tags
+                    )
+                SELECT
+                    ts, value,
+                    pose_x, pose_y, pose_z,
+                    pose_qx, pose_qy, pose_qz, pose_qw,
+                    CASE
+                        WHEN has_pose THEN public.ST_SetSRID(
+                            public.ST_MakePoint(pose_x, pose_y, pose_z),
+                            0
+                        )::public.geometry(PointZ, 0)
+                        ELSE NULL
+                    END,
+                    tags
+                FROM rows
+                ORDER BY ord
+                RETURNING id
+                """,
+                self._insert_arrays(observations),
+            ).fetchall()
+            return [int(item["id"] if isinstance(item, dict) else item[0]) for item in row]
+
+    @staticmethod
+    def _insert_params(obs: Observation[T]) -> tuple[Any, ...]:
+        pose = obs.pose_tuple
+        tags_json = json.dumps(obs.tags) if obs.tags else "{}"
+        if isinstance(obs._data, bool):
+            value = int(obs._data)
+        else:
+            value = obs._data if isinstance(obs._data, (int, float)) else None
+        if pose:
+            px, py, pz, qx, qy, qz, qw = pose
+        else:
+            px = py = pz = qx = qy = qz = qw = None
+        return (
+            obs.ts,
+            value,
+            px,
+            py,
+            pz,
+            qx,
+            qy,
+            qz,
+            qw,
+            pose is not None,
+            px,
+            py,
+            pz,
+            tags_json,
+        )
+
+    @staticmethod
+    def _insert_arrays(observations: list[Observation[T]]) -> tuple[list[Any], ...]:
+        ords: list[int] = []
+        timestamps: list[float] = []
+        values: list[Decimal | None] = []
+        pose_x: list[float | None] = []
+        pose_y: list[float | None] = []
+        pose_z: list[float | None] = []
+        pose_qx: list[float | None] = []
+        pose_qy: list[float | None] = []
+        pose_qz: list[float | None] = []
+        pose_qw: list[float | None] = []
+        has_pose: list[bool] = []
+        tags: list[str] = []
+
+        for index, obs in enumerate(observations):
+            ords.append(index)
+            timestamps.append(float(obs.ts))
+            if isinstance(obs._data, bool):
+                values.append(Decimal(int(obs._data)))
+            elif isinstance(obs._data, int):
+                values.append(Decimal(obs._data))
+            elif isinstance(obs._data, float):
+                values.append(Decimal(str(obs._data)))
+            else:
+                values.append(None)
+
+            pose = obs.pose_tuple
+            has_pose.append(pose is not None)
+            if pose is None:
+                pose_x.append(None)
+                pose_y.append(None)
+                pose_z.append(None)
+                pose_qx.append(None)
+                pose_qy.append(None)
+                pose_qz.append(None)
+                pose_qw.append(None)
+            else:
+                px, py, pz, qx, qy, qz, qw = pose
+                pose_x.append(px)
+                pose_y.append(py)
+                pose_z.append(pz)
+                pose_qx.append(qx)
+                pose_qy.append(qy)
+                pose_qz.append(qz)
+                pose_qw.append(qw)
+            tags.append(json.dumps(obs.tags) if obs.tags else "{}")
+
+        return (
+            ords,
+            timestamps,
+            values,
+            pose_x,
+            pose_y,
+            pose_z,
+            pose_qx,
+            pose_qy,
+            pose_qz,
+            pose_qw,
+            has_pose,
+            tags,
+        )
 
     def _ensure_tag_indexes(self, tags: dict[str, Any]) -> None:
         for key in tags:
             if key not in self._tag_indexes and _IDENT_RE.match(key):
                 self._conn.execute(
                     f'CREATE INDEX IF NOT EXISTS "{self._name}_tag_{key}" '
-                    f'ON "{self._name}" ((tags ->> \'{key}\'))'
+                    f'ON "{self._name}" ((tags -> \'{key}\'))'
                 )
                 self._tag_indexes.add(key)
 
@@ -362,6 +488,9 @@ class PostgresObservationStore(ObservationStore[T]):
             (ids,),
         ).fetchall()
         return [self._row_to_obs(row) for row in rows]
+
+    def optimize(self) -> None:
+        self._conn.execute(f'ANALYZE "{self._name}"')
 
     def commit(self) -> None:
         commit = getattr(self._conn, "commit", None)

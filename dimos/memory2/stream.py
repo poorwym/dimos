@@ -670,3 +670,58 @@ class Stream(CompositeResource, Generic[T, O]):
         else:
             obs = Observation(id=-1, ts=_ts, pose=pose, tags=_tags, _data=payload)
         return self._source.append(obs)
+
+    def append_many(
+        self,
+        payloads: list[T],
+        *,
+        ts: list[float | None] | None = None,
+        pose: list[Any | None] | None = None,
+        tags: list[dict[str, Any] | None] | None = None,
+        embeddings: list[Embedding | None] | None = None,
+    ) -> list[Observation[T]]:
+        """Append multiple payloads while allowing the backend to batch writes."""
+        if isinstance(self._source, Stream) or self._source is None:
+            raise TypeError(
+                "Cannot append to a transform/unbound stream. Append to the source stream."
+            )
+
+        count = len(payloads)
+        ts_values = ts if ts is not None else [None] * count
+        pose_values = pose if pose is not None else [None] * count
+        tag_values = tags if tags is not None else [None] * count
+        embedding_values = embeddings if embeddings is not None else [None] * count
+        lengths = {len(ts_values), len(pose_values), len(tag_values), len(embedding_values), count}
+        if len(lengths) != 1:
+            raise ValueError("append_many inputs must have matching lengths")
+
+        observations: list[Observation[T]] = []
+        for payload, ts_value, pose_value, tags_value, embedding in zip(
+            payloads,
+            ts_values,
+            pose_values,
+            tag_values,
+            embedding_values,
+            strict=True,
+        ):
+            obs_ts = ts_value if ts_value is not None else time.time()
+            obs_tags = tags_value or {}
+            if embedding is not None:
+                obs: Observation[T] = EmbeddedObservation(
+                    id=-1,
+                    ts=obs_ts,
+                    pose=pose_value,
+                    tags=obs_tags,
+                    _data=payload,
+                    embedding=embedding,
+                )
+            else:
+                obs = Observation(
+                    id=-1,
+                    ts=obs_ts,
+                    pose=pose_value,
+                    tags=obs_tags,
+                    _data=payload,
+                )
+            observations.append(obs)
+        return self._source.append_many(observations)

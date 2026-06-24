@@ -218,6 +218,14 @@ def _populate(store: Store) -> JsonValue:
     vectors.append("south", ts=3.0, tags={"axis": "y"}, embedding=_embedding([0.0, -1.0, 0.0]))
     vectors.append("northeast", ts=4.0, tags={"axis": "xy"}, embedding=_embedding([1.0, 2.0, 0.0]))
 
+    bulk = store.stream("bulk_numbers", int)
+    bulk.append_many(
+        [10, 20, 30],
+        ts=[100.0, 200.0, 300.0],
+        pose=[(10, 0, 0), (20, 0, 0), None],
+        tags=[{"batch": 1}, {"batch": 1}, {"batch": 2}],
+    )
+
     return sorted(store.list_streams())
 
 
@@ -273,6 +281,16 @@ def _cases() -> list[tuple[str, Callable[[Store], JsonValue]]]:
         ),
         ("numbers_count_all", lambda store: store.stream("numbers").count()),
         ("numbers_count_near", lambda store: store.stream("numbers").near((0, 0, 0), 6.0).count()),
+        (
+            "bulk_numbers_all",
+            lambda store: _normalize_observations(store.stream("bulk_numbers").to_list()),
+        ),
+        (
+            "bulk_numbers_near",
+            lambda store: _normalize_observations(
+                store.stream("bulk_numbers").near((15, 0, 0), 6.0).to_list()
+            ),
+        ),
         ("floats_all", lambda store: _normalize_observations(store.stream("floats").to_list())),
         ("logs_all", lambda store: _normalize_observations(store.stream("logs").to_list())),
         (

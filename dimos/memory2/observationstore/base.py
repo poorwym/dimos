@@ -56,6 +56,13 @@ class ObservationStore(Configurable, CompositeResource, Generic[T]):
         """Insert observation metadata, return assigned id."""
         ...
 
+    def insert_many(self, observations: list[Observation[T]]) -> list[int]:
+        """Insert multiple observations and return assigned ids in input order."""
+        return [self.insert(obs) for obs in observations]
+
+    def optimize(self) -> None:
+        """Refresh backend-specific metadata indexes/statistics."""
+
     @abstractmethod
     def query(self, q: StreamQuery) -> Iterator[Observation[T]]:
         """Execute query against metadata. Blobs are NOT loaded here."""

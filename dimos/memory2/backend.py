@@ -139,6 +139,62 @@ class Backend(CompositeResource, Generic[T]):
         self.notifier.notify(obs)
         return obs
 
+    def append_many(self, observations: list[Observation[T]]) -> list[Observation[T]]:
+        """Append multiple observations with one backend commit."""
+        if not observations:
+            return []
+
+        encoded_blobs: list[bytes | None] = []
+        for obs in observations:
+            payload = obs.data
+            if self.data_type is not object and not isinstance(payload, self.data_type):
+                raise TypeError(
+                    f"Stream expects {self.data_type.__qualname__}, "
+                    f"got {type(payload).__qualname__}"
+                )
+            obs.data_type = self.data_type
+            is_scalar = isinstance(payload, (int, float))
+            encoded = None
+            if self.blob_store is not None and not is_scalar:
+                encoded = self.codec.encode(payload)
+            encoded_blobs.append(encoded)
+
+        try:
+            row_ids = self.metadata_store.insert_many(observations)
+            if len(row_ids) != len(observations):
+                raise RuntimeError(
+                    f"insert_many returned {len(row_ids)} ids for {len(observations)} observations"
+                )
+
+            blob_items: list[tuple[int, bytes]] = []
+            vector_items: list[tuple[int, Any]] = []
+            for obs, row_id, encoded in zip(observations, row_ids, encoded_blobs, strict=True):
+                obs.id = row_id
+                if encoded is not None:
+                    blob_items.append((row_id, encoded))
+                    obs._data = _UNLOADED
+                    obs._loader = self._make_loader(row_id)
+                emb = getattr(obs, "embedding", None)
+                if emb is not None:
+                    vector_items.append((row_id, emb))
+
+            if blob_items:
+                assert self.blob_store is not None
+                self.blob_store.put_many(self.name, blob_items)
+            if vector_items and self.vector_store is not None:
+                self.vector_store.put_many(self.name, vector_items)
+
+            if hasattr(self.metadata_store, "commit"):
+                self.metadata_store.commit()
+        except BaseException:
+            if hasattr(self.metadata_store, "rollback"):
+                self.metadata_store.rollback()
+            raise
+
+        for obs in observations:
+            self.notifier.notify(obs)
+        return observations
+
     def iterate(self, query: StreamQuery) -> Iterator[Observation[T]]:
         if query.search_vec is not None and query.live_buffer is not None:
             raise TypeError("Cannot combine .search() with .live() — search is a batch operation.")

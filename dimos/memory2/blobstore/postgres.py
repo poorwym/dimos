@@ -65,6 +65,20 @@ class PostgresBlobStore(BlobStore):
             (key, data),
         )
 
+    def put_many(self, stream_name: str, items: list[tuple[int, bytes]]) -> None:
+        if not items:
+            return
+        validate_identifier(stream_name)
+        self._ensure_table(stream_name)
+        self._conn.cursor().executemany(
+            f"""
+            INSERT INTO "{stream_name}_blob" (id, data)
+            VALUES (%s, %s)
+            ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data
+            """,
+            items,
+        )
+
     def get(self, stream_name: str, key: int) -> bytes:
         validate_identifier(stream_name)
         try:
