@@ -97,29 +97,10 @@ def _compile_filter(f: Filter, prefix: str = "") -> tuple[str, list[Any]] | None
         return (" AND ".join(clauses), params)
     if isinstance(f, NearFilter):
         cx, cy, cz = f.position.x, f.position.y, f.position.z
-        r = f.radius
         return (
-            f"{prefix}pose_x BETWEEN %s AND %s "
-            f"AND {prefix}pose_y BETWEEN %s AND %s "
-            f"AND {prefix}pose_z BETWEEN %s AND %s "
-            f"AND (({prefix}pose_x - %s) * ({prefix}pose_x - %s) + "
-            f"({prefix}pose_y - %s) * ({prefix}pose_y - %s) + "
-            f"({prefix}pose_z - %s) * ({prefix}pose_z - %s) <= %s)",
-            [
-                cx - r,
-                cx + r,
-                cy - r,
-                cy + r,
-                cz - r,
-                cz + r,
-                cx,
-                cx,
-                cy,
-                cy,
-                cz,
-                cz,
-                r * r,
-            ],
+            f"public.ST_3DDWithin({prefix}pose_point, "
+            "public.ST_SetSRID(public.ST_MakePoint(%s, %s, %s), 0)::public.geometry, %s)",
+            [cx, cy, cz, f.radius],
         )
     return None
 
@@ -214,6 +195,7 @@ class PostgresObservationStore(ObservationStore[T]):
         self._ensure_table()
 
     def _ensure_table(self) -> None:
+        self._conn.execute("CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public")
         self._conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS "{self._name}" (
@@ -227,9 +209,14 @@ class PostgresObservationStore(ObservationStore[T]):
                 pose_qy double precision,
                 pose_qz double precision,
                 pose_qw double precision,
+                pose_point public.geometry(PointZ, 0),
                 tags    jsonb NOT NULL DEFAULT '{{}}'::jsonb
             )
             """
+        )
+        self._conn.execute(
+            f'ALTER TABLE "{self._name}" '
+            "ADD COLUMN IF NOT EXISTS pose_point public.geometry(PointZ, 0)"
         )
         self._conn.execute(
             f'CREATE INDEX IF NOT EXISTS "{self._name}_ts_idx" ON "{self._name}" (ts)'
@@ -239,8 +226,9 @@ class PostgresObservationStore(ObservationStore[T]):
             f'ON "{self._name}" USING gin (tags)'
         )
         self._conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "{self._name}_pose_idx" '
-            f'ON "{self._name}" (pose_x, pose_y, pose_z)'
+            f'CREATE INDEX IF NOT EXISTS "{self._name}_pose_point_idx" '
+            f'ON "{self._name}" USING gist (pose_point public.gist_geometry_ops_nd) '
+            "WHERE pose_point IS NOT NULL"
         )
         self.commit()
 
@@ -266,11 +254,44 @@ class PostgresObservationStore(ObservationStore[T]):
             row = self._conn.execute(
                 f"""
                 INSERT INTO "{self._name}"
-                    (ts, value, pose_x, pose_y, pose_z, pose_qx, pose_qy, pose_qz, pose_qw, tags)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (
+                        ts, value,
+                        pose_x, pose_y, pose_z,
+                        pose_qx, pose_qy, pose_qz, pose_qw,
+                        pose_point,
+                        tags
+                    )
+                VALUES (
+                    %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    CASE
+                        WHEN %s THEN public.ST_SetSRID(
+                            public.ST_MakePoint(%s, %s, %s),
+                            0
+                        )::public.geometry(PointZ, 0)
+                        ELSE NULL
+                    END,
+                    %s::jsonb
+                )
                 RETURNING id
                 """,
-                (obs.ts, value, px, py, pz, qx, qy, qz, qw, tags_json),
+                (
+                    obs.ts,
+                    value,
+                    px,
+                    py,
+                    pz,
+                    qx,
+                    qy,
+                    qz,
+                    qw,
+                    pose is not None,
+                    px,
+                    py,
+                    pz,
+                    tags_json,
+                ),
             ).fetchone()
         assert row is not None
         return int(row["id"] if isinstance(row, dict) else row[0])

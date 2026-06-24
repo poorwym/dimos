@@ -161,6 +161,14 @@ def test_postgres_scalar_stream_queries_and_reopens(postgres_conn: object) -> No
         stream.append(2, ts=20.0, pose=(1, 0, 0), tags={"kind": "even"})
         stream.append(3, ts=30.0, pose=(5, 0, 0), tags={"kind": "odd"})
 
+        point_row = postgres_conn.execute(  # type: ignore[attr-defined]
+            """
+            SELECT public.GeometryType(pose_point), public.ST_Z(pose_point)
+            FROM numbers
+            WHERE id = 1
+            """
+        ).fetchone()
+        assert point_row == ("POINT", 0.0)
         assert stream.count() == 3
         assert stream.exists()
         assert stream.first().data == 1
