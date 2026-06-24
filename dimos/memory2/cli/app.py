@@ -32,3 +32,38 @@ def rerun(
     from dimos.memory2.cli.render import open_store, render_store
 
     render_store(open_store(path), out=out, seconds=seconds, no_gui=no_gui)
+
+
+@mem_app.command("migrate-sqlite-postgres")
+def migrate_sqlite_postgres(
+    sqlite_path: str = typer.Argument(..., help="Source memory2 SQLite .db path"),
+    dsn: str = typer.Option(..., "--dsn", help="Target PostgreSQL DSN"),
+    stream: list[str] | None = typer.Option(
+        None,
+        "--stream",
+        help="Stream to migrate. Repeat to migrate a subset; default migrates all streams.",
+    ),
+    replace: bool = typer.Option(
+        False,
+        "--replace",
+        help="Drop existing target streams before migrating them.",
+    ),
+    batch_size: int = typer.Option(1000, "--batch-size", help="Rows per insert batch"),
+) -> None:
+    """Migrate a memory2 SQLite store to PostgreSQL."""
+    from dimos.memory2.cli.migrate_sqlite_to_postgres import migrate_sqlite_to_postgres
+
+    result = migrate_sqlite_to_postgres(
+        sqlite_path,
+        dsn,
+        streams=stream,
+        replace=replace,
+        batch_size=batch_size,
+    )
+    typer.echo(
+        "Migrated "
+        f"{result.streams} stream(s), "
+        f"{result.observations} observation row(s), "
+        f"{result.blobs} blob row(s), "
+        f"{result.vectors} vector row(s)."
+    )

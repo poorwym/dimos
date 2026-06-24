@@ -15,17 +15,21 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 from uuid import uuid4
 
 import numpy as np
 import pytest
 
 from dimos.memory2.blobstore.postgres import PostgresBlobStore
+from dimos.memory2.cli.migrate_sqlite_to_postgres import migrate_sqlite_to_postgres
 from dimos.memory2.notifier.subject import SubjectNotifier
 from dimos.memory2.observationstore.postgres import PostgresObservationStore
 from dimos.memory2.registry import qual
 from dimos.memory2.store.postgres import PostgresRegistryStore, PostgresStore
+from dimos.memory2.store.sqlite import SqliteStore
 from dimos.memory2.type.observation import _UNLOADED
 from dimos.memory2.vectorstore.postgres import PostgresVectorStore
 from dimos.models.embedding.base import Embedding
@@ -253,3 +257,45 @@ def test_postgres_vector_search_with_pgvector(postgres_conn: object) -> None:
 
         store.delete_stream("vecs")
         assert postgres_conn.execute("SELECT to_regclass('vecs_vec')").fetchone()[0] is None  # type: ignore[attr-defined]
+
+
+def test_migrate_sqlite_to_postgres(
+    tmp_path: Path,
+    postgres_conn: object,
+) -> None:
+    def emb(vec: list[float]) -> Embedding:
+        arr = np.array(vec, dtype=np.float32)
+        return Embedding(vector=arr / (np.linalg.norm(arr) + 1e-10))
+
+    sqlite_path = tmp_path / "source.db"
+    with SqliteStore(path=str(sqlite_path)) as store:
+        nums = store.stream("numbers", int)
+        nums.append(1, ts=10.0, pose=(0, 0, 0), tags={"kind": "odd"})
+        nums.append(2, ts=20.0, pose=(5, 0, 0), tags={"kind": "even"})
+
+        logs = store.stream("logs", str)
+        logs.append("hello", ts=1.0)
+
+        vecs = store.stream("vecs", str)
+        vecs.append("north", ts=1.0, embedding=emb([0, 1, 0]))
+        vecs.append("east", ts=2.0, embedding=emb([1, 0, 0]))
+
+    schema = postgres_conn.execute("SELECT current_schema()").fetchone()[0]  # type: ignore[attr-defined]
+    dsn = f"{_postgres_dsn()}?options={quote(f'-c search_path={schema}')}"
+    result = migrate_sqlite_to_postgres(sqlite_path, dsn)
+
+    assert result.streams == 3
+    assert result.observations == 5
+    assert result.blobs == 3
+    assert result.vectors == 2
+
+    with PostgresStore(conn=postgres_conn) as store:
+        assert sorted(store.list_streams()) == ["logs", "numbers", "vecs"]
+        assert [obs.data for obs in store.stream("numbers").near((0, 0, 0), 1.5)] == [1]
+        assert [obs.data for obs in store.stream("logs")] == ["hello"]
+        assert [obs.data for obs in store.stream("vecs").search(emb([0, 1, 0]), k=2)] == [
+            "north",
+            "east",
+        ]
+
+    assert postgres_conn.execute("SELECT to_regclass('numbers_rtree')").fetchone()[0] is None  # type: ignore[attr-defined]
