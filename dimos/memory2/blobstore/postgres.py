@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import Field
 
 from dimos.memory2.blobstore.base import BlobStore, BlobStoreConfig
+from dimos.memory2.utils.validation import validate_identifier
 
 
 class PostgresBlobStoreConfig(BlobStoreConfig):
@@ -26,22 +27,72 @@ class PostgresBlobStoreConfig(BlobStoreConfig):
 
 
 class PostgresBlobStore(BlobStore):
-    """Postgres bytea blob store shell.
-
-    Storage SQL is implemented under the dedicated PostgresBlobStore issue.
-    """
+    """Stores blobs in a separate Postgres bytea table per stream."""
 
     config: PostgresBlobStoreConfig
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._conn = self.config.conn
+        self._tables: set[str] = set()
+
+    def start(self) -> None:
+        pass
+
+    def _ensure_table(self, stream_name: str) -> None:
+        if stream_name in self._tables:
+            return
+        validate_identifier(stream_name)
+        self._conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS "{stream_name}_blob" (
+                id   bigint PRIMARY KEY,
+                data bytea NOT NULL
+            )
+            """
+        )
+        self._tables.add(stream_name)
 
     def put(self, stream_name: str, key: int, data: bytes) -> None:
-        raise NotImplementedError("PostgresBlobStore.put is not implemented yet")
+        validate_identifier(stream_name)
+        self._ensure_table(stream_name)
+        self._conn.execute(
+            f"""
+            INSERT INTO "{stream_name}_blob" (id, data)
+            VALUES (%s, %s)
+            ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data
+            """,
+            (key, data),
+        )
 
     def get(self, stream_name: str, key: int) -> bytes:
-        raise NotImplementedError("PostgresBlobStore.get is not implemented yet")
+        validate_identifier(stream_name)
+        try:
+            row = self._conn.execute(
+                f'SELECT data FROM "{stream_name}_blob" WHERE id = %s',
+                (key,),
+            ).fetchone()
+        except Exception:
+            rollback = getattr(self._conn, "rollback", None)
+            if rollback is not None:
+                rollback()
+            raise KeyError(f"No blob for stream={stream_name!r}, key={key}") from None
+        if row is None:
+            raise KeyError(f"No blob for stream={stream_name!r}, key={key}")
+        data = row["data"] if isinstance(row, dict) else row[0]
+        return bytes(data)
 
     def delete(self, stream_name: str, key: int) -> None:
-        raise NotImplementedError("PostgresBlobStore.delete is not implemented yet")
+        validate_identifier(stream_name)
+        try:
+            cur = self._conn.execute(
+                f'DELETE FROM "{stream_name}_blob" WHERE id = %s',
+                (key,),
+            )
+        except Exception:
+            rollback = getattr(self._conn, "rollback", None)
+            if rollback is not None:
+                rollback()
+            raise KeyError(f"No blob for stream={stream_name!r}, key={key}") from None
+        if cur.rowcount == 0:
+            raise KeyError(f"No blob for stream={stream_name!r}, key={key}")

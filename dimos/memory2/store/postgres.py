@@ -215,7 +215,12 @@ class PostgresStore(Store):
         return sorted(db_names | set(self._streams.keys()))
 
     def delete_stream(self, name: str) -> None:
+        validate_identifier(name)
         super().delete_stream(name)
+        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_blob"')
+        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_vec"')
+        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_rtree"')
         self._registry.delete(name)
 
     def stop(self) -> None:
