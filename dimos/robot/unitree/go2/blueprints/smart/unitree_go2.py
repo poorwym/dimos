@@ -47,6 +47,8 @@ unitree_go2 = autoconnect(
     MovementManager.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_go2")
 
+unitree_go2_postgres = unitree_go2.global_config(robot_ip="postgres", replay=True)
+
 
 class Go2MemoryConfig(RecorderConfig):
     db_path: str | Path = "recording_go2.db"

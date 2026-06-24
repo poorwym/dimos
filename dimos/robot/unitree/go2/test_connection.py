@@ -25,7 +25,7 @@ import pytest
 
 from dimos.core.global_config import GlobalConfig
 from dimos.robot.unitree.go2 import connection as go2_conn
-from dimos.robot.unitree.go2.connection import ConnectionConfig
+from dimos.robot.unitree.go2.connection import ConnectionConfig, PostgresReplayConnection
 
 
 @pytest.fixture
@@ -48,3 +48,21 @@ def test_connection_config_aes_key_defaults_from_global_config() -> None:
     """ConnectionConfig.aes_128_key defaults from GlobalConfig.unitree_aes_128_key."""
     g = GlobalConfig(robot_ip="127.0.0.1", unitree_aes_128_key="dd" * 16)
     assert ConnectionConfig(g=g).aes_128_key == "dd" * 16
+
+
+def test_make_connection_postgres_uses_postgres_replay() -> None:
+    """postgres sentinel routes Go2 replay through the Postgres store."""
+    cfg = GlobalConfig(robot_ip="postgres", postgres_dsn="postgresql://example/dimos")
+
+    connection = go2_conn.make_connection("postgres", cfg)
+
+    assert isinstance(connection, PostgresReplayConnection)
+    assert connection.dsn == "postgresql://example/dimos"
+
+
+def test_postgres_replay_requires_dsn() -> None:
+    """Postgres replay fails with an actionable config error when DSN is missing."""
+    connection = PostgresReplayConnection()
+
+    with pytest.raises(ValueError, match="--postgres-dsn or POSTGRES_DSN"):
+        _ = connection.replay

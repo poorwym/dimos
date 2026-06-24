@@ -39,6 +39,7 @@ from dimos.utils.logging_config import setup_logger
 if TYPE_CHECKING:
     from dimos.core.rpc_client import ModuleProxy
 from dimos.memory2.replay import Replay, resolve_db_path
+from dimos.memory2.store.postgres import PostgresStore
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -120,7 +121,9 @@ def make_connection(
 ) -> Go2ConnectionProtocol:
     connection_type = cfg.unitree_connection_type.lower()
 
-    if ip in ("fake", "mock", "replay") or connection_type == "replay":
+    if ip in ("postgres", "postgres-replay"):
+        return PostgresReplayConnection(dsn=cfg.postgres_dsn)
+    elif ip in ("fake", "mock", "replay") or connection_type == "replay":
         dataset = cfg.replay_db
         return ReplayConnection(dataset=dataset)
     elif ip == "mujoco" or connection_type in ("mujoco", "true"):
@@ -198,6 +201,22 @@ class ReplayConnection(UnitreeWebRTCConnection, CompositeResource):
     def publish_request(self, topic: str, data: dict):  # type: ignore[no-untyped-def, type-arg]
         """Fake publish request for testing."""
         return {"status": "ok", "message": "Fake publish"}
+
+
+class PostgresReplayConnection(ReplayConnection):
+    def __init__(self, dsn: str | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.dsn = dsn
+
+    @cached_property
+    def replay(self) -> Replay:
+        if self.dsn is None:
+            raise ValueError(
+                "Postgres replay requires --postgres-dsn or POSTGRES_DSN in the environment"
+            )
+        store = self.register_disposable(PostgresStore(dsn=self.dsn))
+        store.start()
+        return store.replay(loop=self._loop, seek=self._seek, duration=self._duration)
 
 
 _Config = TypeVar("_Config", bound=ConnectionConfig, default=ConnectionConfig)

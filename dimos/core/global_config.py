@@ -14,6 +14,7 @@
 
 import re
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from dimos.constants import DEFAULT_BUILD_NATIVE
@@ -43,6 +44,10 @@ class GlobalConfig(BaseSettings):
     simulation: str = ""
     replay: bool = False
     replay_db: str = "go2_short"
+    postgres_dsn: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("postgres_dsn", "POSTGRES_DSN", "DIMOS_POSTGRES_DSN"),
+    )
     new_memory: bool = False
     viewer: ViewerBackend = "rerun"
     rerun_open: RerunOpenOption = RERUN_OPEN_DEFAULT
